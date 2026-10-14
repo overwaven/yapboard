@@ -1,0 +1,15 @@
+{
+  "privacy.optout.done": "✅ Got it — I stopped counting your messages in this chat.",
+  "privacy.optin.done": "✅ Welcome back — I'm counting your messages again.",
+  "privacy.forget.done": "🧹 Done. Deleted {rows} hourly records about you in this chat.",
+  "privacy.forget.cancelled": "Cancelled — nothing was deleted.",
+  "privacy.group_only": "This command only works inside a group chat.",
+  "admin.denied": "⛔ Only chat admins can do that.",
+  "admin.paused": "⏸ Counting is paused for this chat. Send /resume to continue.",
+  "admin.resumed": "▶️ Counting is resumed for this chat.",
+  "admin.tz_set": "🧭 Timezone set to {tz}.",
+  "admin.tz_invalid": "⚠️ Unknown timezone '{tz}'. Example: /settings tz Europe/Berlin",
+  "top.cooldown": "⏳ Slow down a little — try again in {seconds}s.",
+  "not.group": "Add me to a group and I'll count the chatter. Send /help.",
+  "error.generic": "⚠️ Something went wrong. Please try again."
+}
