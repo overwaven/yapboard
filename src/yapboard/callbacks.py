@@ -5,6 +5,7 @@ terse. Every board carries the requesting user id so the "only requester may
 press" setting can be enforced (or ignored) without extra round-trips::
 
     top:    t:<uid>:<period>:<metric>:<page>
+    words:  w:<uid>:<period>:<mode>:<page>
     setting:s:<uid>:<field>:<value>
     forget: f:<uid>:<yes|no>
     noop:   n
@@ -18,9 +19,15 @@ MAX_CALLBACK_BYTES = 64
 
 # Callback kinds
 TOP = "top"
+WORDS = "words"
 SETTING = "setting"
 FORGET = "forget"
 NOOP = "noop"
+
+# /words view modes
+WORDS_TOTAL = "t"
+WORDS_BY_MEMBER = "p"
+WORD_MODES = (WORDS_TOTAL, WORDS_BY_MEMBER)
 
 # Settings fields
 FIELD_COLLECTING = "collecting"
@@ -34,6 +41,7 @@ class Callback:
     user_id: int | None = None
     period: str | None = None
     metric: str | None = None
+    mode: str | None = None
     page: int = 0
     field: str | None = None
     value: str | None = None
@@ -45,6 +53,10 @@ class Callback:
 
 def encode_top(user_id: int, period: str, metric: str, page: int) -> str:
     return f"t:{user_id}:{period}:{metric}:{page}"
+
+
+def encode_words(user_id: int, period: str, mode: str, page: int) -> str:
+    return f"w:{user_id}:{period}:{mode}:{page}"
 
 
 def encode_setting(user_id: int, field: str, value: str) -> str:
@@ -86,6 +98,13 @@ def decode(data: str | None) -> Callback | None:
         if uid is None or page is None or not period or not metric or page < 0:
             return None
         return Callback(kind=TOP, user_id=uid, period=period, metric=metric, page=page)
+
+    if head == "w" and len(parts) == 5:
+        uid = _to_int(parts[1])
+        period, mode, page = parts[2], parts[3], _to_int(parts[4])
+        if uid is None or page is None or not period or mode not in WORD_MODES or page < 0:
+            return None
+        return Callback(kind=WORDS, user_id=uid, period=period, mode=mode, page=page)
 
     if head == "s" and len(parts) == 4:
         uid = _to_int(parts[1])

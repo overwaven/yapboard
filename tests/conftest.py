@@ -35,7 +35,8 @@ async def db() -> AsyncIterator[Database]:
     except Exception as error:  # noqa: BLE001
         pytest.skip(f"PostgreSQL not available: {error}")
     await database.execute(
-        "TRUNCATE optouts, activity_hourly, users, chats RESTART IDENTITY CASCADE"
+        "TRUNCATE optouts, word_counts, activity_hourly, users, chats "
+        "RESTART IDENTITY CASCADE"
     )
     try:
         yield database

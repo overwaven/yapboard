@@ -52,12 +52,25 @@ def test_callbacks_roundtrip_and_size():
         "m",
         2,
     )
+    words = callbacks.decode(callbacks.encode_words(42, "30d", callbacks.WORDS_BY_MEMBER, 3))
+    assert words is not None
+    assert (words.kind, words.user_id, words.period, words.mode, words.page) == (
+        callbacks.WORDS,
+        42,
+        "30d",
+        callbacks.WORDS_BY_MEMBER,
+        3,
+    )
     assert callbacks.decode(callbacks.encode_setting(7, callbacks.FIELD_COLLECTING, "1")).truthy_value
     assert callbacks.decode(callbacks.encode_forget(5, True)).value == "yes"
     assert callbacks.decode(callbacks.encode_noop()).kind == callbacks.NOOP
 
     payload = callbacks.encode_top(999999999999, "rb3a-3zz", "v", 99)
     assert len(payload.encode()) <= callbacks.MAX_CALLBACK_BYTES
+    words_payload = callbacks.encode_words(
+        999999999999, "rb3a-3zz", callbacks.WORDS_BY_MEMBER, 99
+    )
+    assert len(words_payload.encode()) <= callbacks.MAX_CALLBACK_BYTES
 
 
 def test_callbacks_reject_malformed():
@@ -68,6 +81,9 @@ def test_callbacks_reject_malformed():
         "t:1:7d:m",
         "t:x:7d:m:0",
         "t:1:7d:m:-1",
+        "w:1:7d:x:0",
+        "w:x:7d:t:0",
+        "w:1:7d:t:-1",
         "s:1",
         "f:1:maybe",
         "t:" + "1" * 100,

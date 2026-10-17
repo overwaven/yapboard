@@ -1,8 +1,10 @@
-"""In-memory activity buffer with periodic batched flush.
+"""In-memory activity and word buffers with periodic batched flush.
 
-Counters live in a dict keyed by ``(chat_id, user_id, utc_hour)``. A background
-task swaps the buffer out every ``flush_interval`` seconds (or sooner when it
-grows past ``flush_max_keys``) and upserts it in a single transaction.
+Activity counters live in a dict keyed by ``(chat_id, user_id, utc_hour)``.
+Normalized word counts live in a separate dict keyed by
+``(chat_id, user_id, local_day, stem, display_word)``. A background task swaps
+both buffers out every ``flush_interval`` seconds (or sooner when they grow past
+``flush_max_keys``) and upserts them in a single transaction.
 
 Crash exposure is bounded by the flush interval; nothing is ever lost from the
 database that has already been flushed.
@@ -14,10 +16,12 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from .db import Database
+from .words import Token
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +33,13 @@ ON CONFLICT (chat_id, user_id, bucket) DO UPDATE SET
     chars   = activity_hourly.chars   + EXCLUDED.chars,
     media   = activity_hourly.media   + EXCLUDED.media,
     replies = activity_hourly.replies + EXCLUDED.replies
+"""
+
+UPSERT_WORDS = """
+INSERT INTO word_counts (chat_id, user_id, day, stem, word, n)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (chat_id, user_id, day, stem, word) DO UPDATE SET
+    n = word_counts.n + EXCLUDED.n
 """
 
 UPSERT_USER = """
@@ -67,18 +78,24 @@ class Collector:
         self.profile_refresh_sec = profile_refresh_sec
 
         self._buffer: dict[tuple[int, int, datetime], Counter] = {}
+        self._words: dict[tuple[int, int, date, str, str], int] = {}
         self._profiles: dict[int, tuple[str | None, str | None]] = {}
         self._profile_seen: dict[int, float] = {}
         self._wake = asyncio.Event()
 
         # Stats for logging.
         self.rows_flushed = 0
+        self.word_rows_flushed = 0
         self.flushes = 0
         self.last_flush_ms = 0.0
 
     @property
     def pending_keys(self) -> int:
         return len(self._buffer)
+
+    @property
+    def pending_words(self) -> int:
+        return len(self._words)
 
     @property
     def pending_profiles(self) -> int:
@@ -117,7 +134,25 @@ class Collector:
                 first_name = first_name or previous[1]
             self._profiles[user_id] = (username, first_name)
 
-        if len(self._buffer) >= self.max_keys:
+        if len(self._buffer) + len(self._words) >= self.max_keys:
+            self._wake.set()
+
+    def add_words(
+        self,
+        chat_id: int,
+        user_id: int,
+        day: date,
+        words: Mapping[Token, int],
+    ) -> None:
+        """Accumulate normalized word counts for one chat-local day."""
+        if not words:
+            return
+        for (stem, word), count in words.items():
+            if count <= 0:
+                continue
+            key = (chat_id, user_id, day, stem, word)
+            self._words[key] = self._words.get(key, 0) + count
+        if len(self._buffer) + len(self._words) >= self.max_keys:
             self._wake.set()
 
     def snapshot(self) -> list[tuple[int, int, datetime, int, int, int, int]]:
@@ -129,10 +164,18 @@ class Collector:
             )
         return rows
 
+    def snapshot_words(self) -> list[tuple[int, int, date, str, str, int]]:
+        """Return already-accumulated word rows without disturbing the buffer."""
+        return [
+            (chat_id, user_id, day, stem, word, count)
+            for (chat_id, user_id, day, stem, word), count in self._words.items()
+        ]
+
     async def flush(self, db: Database) -> int:
         buffer, self._buffer = self._buffer, {}
+        words, self._words = self._words, {}
         profiles, self._profiles = self._profiles, {}
-        if not buffer and not profiles:
+        if not buffer and not words and not profiles:
             return 0
 
         started = time.monotonic()
@@ -140,22 +183,30 @@ class Collector:
             (chat_id, user_id, bucket, counter.msgs, counter.chars, counter.media, counter.replies)
             for (chat_id, user_id, bucket), counter in buffer.items()
         ]
+        word_rows = [
+            (chat_id, user_id, day, stem, word, count)
+            for (chat_id, user_id, day, stem, word), count in words.items()
+        ]
         profile_rows = [(uid, username, first_name) for uid, (username, first_name) in profiles.items()]
 
         try:
             async with db.pool.acquire() as conn, conn.transaction():
                 if rows:
                     await conn.executemany(UPSERT_ACTIVITY, rows, timeout=30)
+                if word_rows:
+                    await conn.executemany(UPSERT_WORDS, word_rows, timeout=30)
                 if profile_rows:
                     await conn.executemany(UPSERT_USER, profile_rows, timeout=30)
         except Exception:
             # A transient DB error must not drop counters collected while we were
             # attempting the write; merge the batch back for the next flush.
             self._merge_back(buffer)
+            self._merge_words_back(words)
             raise
 
         self.last_flush_ms = (time.monotonic() - started) * 1000
         self.rows_flushed += len(rows)
+        self.word_rows_flushed += len(word_rows)
         self.flushes += 1
         return len(rows)
 
@@ -169,6 +220,10 @@ class Collector:
             existing.chars += counter.chars
             existing.media += counter.media
             existing.replies += counter.replies
+
+    def _merge_words_back(self, words: dict[tuple[int, int, date, str, str], int]) -> None:
+        for key, count in words.items():
+            self._words[key] = self._words.get(key, 0) + count
 
     async def run(self, db: Database, stop_event: asyncio.Event) -> None:
         """Background loop; flushes on interval, on wake, and once on shutdown."""

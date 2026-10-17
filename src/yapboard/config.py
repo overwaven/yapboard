@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     default_tz: str = "UTC"
     log_level: str = "INFO"
 
+    # Aggregate normalized word frequencies for /words. No message text is
+    # stored — only per-user word counts.
+    word_stats_enabled: bool = True
+
     # How long a per-chat board is cached before it is re-queried (seconds).
     board_cache_ttl: float = 10.0
     # Minimum interval between two profile (username/first name) upserts per user.

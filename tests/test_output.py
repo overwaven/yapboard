@@ -7,14 +7,19 @@ from aiogram.methods import SendMessage
 
 from yapboard.messenger import EDIT_EDITED, EDIT_UNCHANGED, Messenger
 from yapboard.render import (
+    MemberWord,
+    MemberWords,
     MeStat,
     TopEntry,
+    WordEntry,
     hours_view,
     leaderboard_view,
     me_view,
     render_fallback,
     render_rich,
     stats_view,
+    words_by_member_view,
+    words_total_view,
 )
 
 NOW = datetime(2026, 1, 10, 21, 4, tzinfo=UTC)
@@ -115,6 +120,84 @@ def test_fallback_html_is_escaped():
     assert "&lt;b&gt;" in text and "Leaderboard" in text
     callbacks = [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
     assert "t:1:7d:m:0" in callbacks
+
+
+def test_words_views_and_buttons():
+    total = words_total_view(
+        entries=[
+            WordEntry(stem="кот", word="кот", uses=5, members=2),
+            WordEntry(stem="код", word="код", uses=3, members=1),
+        ],
+        total_uses=8,
+        unique_words=2,
+        active_users=2,
+        period_code="7d",
+        period_label="Last 7 days",
+        page=0,
+        pages=2,
+        requester_id=42,
+        updated_at=NOW,
+    )
+    message = render_rich(total)
+    heading, table = message.blocks[0], message.blocks[1]
+    assert "Words" in heading.text and "Everyone" in heading.text
+    assert [c.text for c in table.cells[0]] == ["#", "Word", "Uses", "Share"]
+    assert table.cells[1][1].text == "кот" and table.cells[1][2].text == "5"
+    callbacks = [
+        button.callback_data
+        for block in message.blocks
+        if block.type.value == "buttons"
+        for button in block.buttons
+    ]
+    assert "w:42:7d:t:0" in callbacks and "w:42:7d:p:0" in callbacks
+
+    members = words_by_member_view(
+        members=[
+            MemberWords(
+                user_id=7,
+                username="alex",
+                first_name="Alex",
+                words=[
+                    MemberWord(stem="код", word="код", uses=3),
+                    MemberWord(stem="депл", word="деплой", uses=2),
+                ],
+                total_uses=5,
+                unique_words=2,
+            )
+        ],
+        total_uses=5,
+        total_members=1,
+        period_code="7d",
+        period_label="Last 7 days",
+        page=0,
+        pages=1,
+        requester_id=42,
+        updated_at=NOW,
+    )
+    member_message = render_rich(members)
+    assert "By member" in member_message.blocks[0].text
+    member_table = next(b for b in member_message.blocks if b.type.value == "table")
+    assert [c.text for c in member_table.cells[0]] == ["Member", "Most used words", "Uses"]
+    assert member_table.cells[1][0].text == "@alex"
+    assert member_table.cells[1][1].text == "«код» ×3 · «деплой» ×2"
+
+
+def test_words_fallback_escapes_and_links_callbacks():
+    view = words_total_view(
+        entries=[WordEntry(stem="x", word="a<b>", uses=5)],
+        total_uses=5,
+        unique_words=1,
+        active_users=1,
+        period_code="7d",
+        period_label="Last 7 days",
+        page=0,
+        pages=1,
+        requester_id=1,
+    )
+    text, markup = render_fallback(view)
+    assert "a&lt;b&gt;" in text and "Words" in text
+    callbacks = [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
+    assert "w:1:7d:t:0" in callbacks
 
 
 def test_me_hours_and_stats_views():

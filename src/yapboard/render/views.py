@@ -14,10 +14,13 @@ from datetime import date, datetime
 from ..callbacks import (
     FIELD_COLLECTING,
     FIELD_ONLY_REQUESTER,
+    WORDS_BY_MEMBER,
+    WORDS_TOTAL,
     encode_forget,
     encode_noop,
     encode_setting,
     encode_top,
+    encode_words,
 )
 from ..periods import (
     METRIC_LABELS,
@@ -73,6 +76,31 @@ class MeStat:
     messages: int
     rank: int | None
     total_users: int
+
+
+@dataclass(frozen=True, slots=True)
+class WordEntry:
+    stem: str
+    word: str
+    uses: int
+    members: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class MemberWord:
+    stem: str
+    word: str
+    uses: int
+
+
+@dataclass(slots=True)
+class MemberWords:
+    user_id: int
+    username: str | None
+    first_name: str | None
+    words: list[MemberWord] = field(default_factory=list)
+    total_uses: int = 0
+    unique_words: int = 0
 
 
 def _period_row(uid: int, period: str, metric: str) -> list[Button]:
@@ -180,6 +208,171 @@ def leaderboard_view(
     return View(heading=heading, table=table, footer=footer, keyboard=keyboard)
 
 
+def _words_period_row(uid: int, period: str, mode: str) -> list[Button]:
+    return [
+        Button(
+            text=label,
+            callback_data=encode_words(uid, code, mode, 0),
+            style="primary" if code == period else None,
+        )
+        for code, label in period_buttons()
+    ]
+
+
+def _words_mode_row(uid: int, period: str, mode: str) -> list[Button]:
+    options = (
+        (WORDS_TOTAL, "Everyone"),
+        (WORDS_BY_MEMBER, "By member"),
+    )
+    return [
+        Button(
+            text=label,
+            callback_data=encode_words(uid, period, code, 0),
+            style="primary" if code == mode else None,
+        )
+        for code, label in options
+    ]
+
+
+def _words_pager_row(uid: int, period: str, mode: str, page: int, pages: int) -> list[Button]:
+    return [
+        Button(
+            text="‹ Prev",
+            callback_data=encode_words(uid, period, mode, page - 1),
+            disabled=page <= 0,
+        ),
+        Button(text=f"{page + 1} / {max(1, pages)}", callback_data=encode_noop()),
+        Button(
+            text="Next ›",
+            callback_data=encode_words(uid, period, mode, page + 1),
+            disabled=page >= pages - 1,
+        ),
+    ]
+
+
+def _words_keyboard(
+    uid: int, period: str, mode: str, page: int, pages: int
+) -> Keyboard:
+    keyboard: Keyboard = [
+        _words_period_row(uid, period, mode),
+        _words_mode_row(uid, period, mode),
+    ]
+    if pages > 1:
+        keyboard.append(_words_pager_row(uid, period, mode, page, pages))
+    return keyboard
+
+
+def _short_word(word: str, limit: int = 24) -> str:
+    return word if len(word) <= limit else word[: limit - 1] + "…"
+
+
+def words_total_view(
+    *,
+    entries: list[WordEntry],
+    total_uses: int,
+    unique_words: int,
+    active_users: int,
+    period_code: str,
+    period_label: str,
+    page: int,
+    pages: int,
+    requester_id: int,
+    updated_at: datetime | None = None,
+    page_size: int = 10,
+) -> View:
+    heading = f"🗣 Words · {period_label} · Everyone"
+    keyboard = _words_keyboard(requester_id, period_code, WORDS_TOTAL, page, pages)
+
+    footer_bits = [
+        f"{human(total_uses)} word uses",
+        f"{human(unique_words)} unique words",
+        f"{human(active_users)} members",
+    ]
+    if updated_at is not None:
+        footer_bits.append(f"updated {updated_at.strftime('%H:%M')}")
+    footer = " · ".join(footer_bits)
+
+    if not entries:
+        return View(
+            heading=heading,
+            empty_text="No meaningful words in this period yet — start chatting!",
+            footer=footer,
+            keyboard=keyboard,
+        )
+
+    maximum = max(entry.uses for entry in entries)
+    rows: list[list[str]] = []
+    for index, entry in enumerate(entries):
+        rank = page * page_size + index + 1
+        share = entry.uses / total_uses if total_uses > 0 else 0.0
+        rows.append(
+            [
+                medal(rank),
+                _short_word(entry.word),
+                human(entry.uses),
+                f"{bar(entry.uses, maximum)}  {percent(share)}",
+            ]
+        )
+
+    table = Table(
+        headers=["#", "Word", "Uses", "Share"],
+        rows=rows,
+        aligns=["right", "left", "right", "left"],
+    )
+    return View(heading=heading, table=table, footer=footer, keyboard=keyboard)
+
+
+def words_by_member_view(
+    *,
+    members: list[MemberWords],
+    total_uses: int,
+    total_members: int,
+    period_code: str,
+    period_label: str,
+    page: int,
+    pages: int,
+    requester_id: int,
+    updated_at: datetime | None = None,
+    page_size: int = 10,
+    per_member: int = 5,
+) -> View:
+    heading = f"🗣 Words · {period_label} · By member"
+    keyboard = _words_keyboard(requester_id, period_code, WORDS_BY_MEMBER, page, pages)
+
+    footer_bits = [
+        f"{human(total_members)} members",
+        f"{human(total_uses)} word uses",
+        f"top {per_member} words each",
+    ]
+    if updated_at is not None:
+        footer_bits.append(f"updated {updated_at.strftime('%H:%M')}")
+    footer = " · ".join(footer_bits)
+
+    if not members:
+        return View(
+            heading=heading,
+            empty_text="No meaningful words in this period yet — start chatting!",
+            footer=footer,
+            keyboard=keyboard,
+        )
+
+    rows: list[list[str]] = []
+    for member in members:
+        name = display_name(member.username, member.first_name, member.user_id)
+        words = " · ".join(
+            f"«{_short_word(word.word)}» ×{human(word.uses)}"
+            for word in member.words[:per_member]
+        )
+        rows.append([name, words or "—", human(member.total_uses)])
+
+    table = Table(
+        headers=["Member", "Most used words", "Uses"],
+        rows=rows,
+        aligns=["left", "left", "right"],
+    )
+    return View(heading=heading, table=table, footer=footer, keyboard=keyboard)
+
+
 def me_view(
     *,
     user_id: int,
@@ -251,13 +444,15 @@ def help_view(*, is_admin: bool = False) -> View:
     heading = "❓ Yapboard — chat activity leaderboard"
     paragraphs = [
         "I silently count messages in this chat and show a leaderboard when asked. "
-        "I never store message text.",
+        "I never store message text — only aggregated counters and word "
+        "frequencies.",
         "• /top — leaderboard (period & metric buttons)\n"
+        "• /words — most used meaningful words (total / by member)\n"
         "• /me — your personal card\n"
         "• /hours — time-of-day board\n"
         "• /stats — chat summary\n"
         "• /optout · /optin — stop or resume counting you\n"
-        "• /forgetme — wipe your counters in this chat",
+        "• /forgetme — wipe your data in this chat",
     ]
     if is_admin:
         paragraphs.append("Admin: /settings, /pause, /resume, and /settings tz <Zone/Name>.")
@@ -344,7 +539,7 @@ def stats_view(
         paragraphs=paragraphs,
         table=table,
         empty_text=None if rows else "No activity in this period yet.",
-        footer="Counters only — no message text is ever stored.",
+        footer="Aggregated counters and word frequencies only — no message text is stored.",
     )
 
 
@@ -355,7 +550,12 @@ __all__ = [
     "View",
     "TopEntry",
     "MeStat",
+    "WordEntry",
+    "MemberWord",
+    "MemberWords",
     "leaderboard_view",
+    "words_total_view",
+    "words_by_member_view",
     "me_view",
     "settings_view",
     "help_view",

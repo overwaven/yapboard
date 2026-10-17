@@ -62,10 +62,13 @@ async def _health_loop(ctx: AppContext, stop: asyncio.Event, every: float = 30.0
             await asyncio.wait_for(stop.wait(), timeout=every)
         collector = ctx.collector
         log.info(
-            "health: pending=%d keys, profiles=%d, rows_flushed=%d, flushes=%d, last_flush=%.1fms",
+            "health: pending=%d keys, words=%d, profiles=%d, rows_flushed=%d, "
+            "word_rows=%d, flushes=%d, last_flush=%.1fms",
             collector.pending_keys,
+            collector.pending_words,
             collector.pending_profiles,
             collector.rows_flushed,
+            collector.word_rows_flushed,
             collector.flushes,
             collector.last_flush_ms,
         )

@@ -8,10 +8,13 @@ from .rich import render as render_rich
 from .views import (
     Button,
     Keyboard,
+    MemberWord,
+    MemberWords,
     MeStat,
     Table,
     TopEntry,
     View,
+    WordEntry,
     error_view,
     forget_confirm_view,
     help_view,
@@ -20,6 +23,8 @@ from .views import (
     me_view,
     settings_view,
     stats_view,
+    words_by_member_view,
+    words_total_view,
 )
 
 __all__ = [
@@ -29,9 +34,14 @@ __all__ = [
     "Table",
     "TopEntry",
     "View",
+    "WordEntry",
+    "MemberWord",
+    "MemberWords",
     "render_rich",
     "render_fallback",
     "leaderboard_view",
+    "words_total_view",
+    "words_by_member_view",
     "me_view",
     "settings_view",
     "help_view",

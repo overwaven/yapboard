@@ -210,14 +210,27 @@ class AdminCache:
         return value
 
 
-async def wipe_user(db: Database, chat_id: int, user_id: int) -> int:
-    status = await db.execute(
-        "DELETE FROM activity_hourly WHERE chat_id = $1 AND user_id = $2", chat_id, user_id
-    )
+def _affected(status: str) -> int:
     try:
         return int(str(status).split()[-1])
     except (ValueError, IndexError):
         return 0
+
+
+async def wipe_user(db: Database, chat_id: int, user_id: int) -> int:
+    """Delete activity counters and aggregated word counts for one member."""
+    async with db.pool.acquire() as conn, conn.transaction():
+        activity = await conn.execute(
+            "DELETE FROM activity_hourly WHERE chat_id = $1 AND user_id = $2",
+            chat_id,
+            user_id,
+        )
+        words = await conn.execute(
+            "DELETE FROM word_counts WHERE chat_id = $1 AND user_id = $2",
+            chat_id,
+            user_id,
+        )
+    return _affected(activity) + _affected(words)
 
 
 def with_tz(settings: ChatSettings, tz: str) -> ChatSettings:

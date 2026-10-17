@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import contextlib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
-from yapboard import stats
+from yapboard import stats, wordstats
 from yapboard.collector import Collector, hour_bucket
 from yapboard.periods import resolve
 from yapboard.state import ChatStore, Cooldown, OptoutStore, wipe_user
@@ -43,6 +43,30 @@ async def add_activity(db, user_id: int, moment: datetime, *, msgs=0, chars=0, m
     )
 
 
+async def add_word(
+    db,
+    user_id: int,
+    day: date,
+    stem: str,
+    word: str,
+    n: int,
+    *,
+    chat_id: int = CHAT,
+) -> None:
+    await db.execute(
+        "INSERT INTO word_counts (chat_id, user_id, day, stem, word, n) "
+        "VALUES ($1, $2, $3, $4, $5, $6) "
+        "ON CONFLICT (chat_id, user_id, day, stem, word) DO UPDATE "
+        "SET n = word_counts.n + EXCLUDED.n",
+        chat_id,
+        user_id,
+        day,
+        stem,
+        word,
+        n,
+    )
+
+
 async def test_chat_store_optouts_and_wipe(db):
     store = ChatStore(db, default_tz="Europe/Berlin")
     assert await store.get(CHAT) is None
@@ -72,8 +96,11 @@ async def test_chat_store_optouts_and_wipe(db):
         CHAT,
         bucket(5),
     )
-    assert await wipe_user(db, CHAT, 7) == 1
+    await add_word(db, 7, date(2026, 1, 5), "кот", "кот", 3)
+    await add_word(db, 8, date(2026, 1, 5), "код", "код", 2)
+    assert await wipe_user(db, CHAT, 7) == 2
     assert (await db.fetchval("SELECT count(*) FROM activity_hourly")) == 1
+    assert (await db.fetchval("SELECT count(*) FROM word_counts")) == 1
 
 
 async def test_collector_accumulates_flushes_and_preserves_on_error(db):
@@ -103,6 +130,96 @@ async def test_collector_accumulates_flushes_and_preserves_on_error(db):
     with contextlib.suppress(RuntimeError):
         await failing.flush(type("DB", (), {"pool": BoomPool()})())
     assert failing.pending_keys == 1 and failing.snapshot()[0][3] == 3
+
+
+async def test_collector_flushes_word_counts_and_preserves_on_error(db):
+    await seed_chat(db)
+    collector = Collector()
+    collector.add_words(
+        CHAT,
+        7,
+        date(2026, 1, 5),
+        {("кот", "кот"): 2, ("кот", "кота"): 1, ("код", "код"): 4},
+    )
+    assert collector.pending_words == 3
+
+    await collector.flush(db)
+    assert collector.pending_words == 0 and collector.word_rows_flushed == 3
+    rows = await db.fetch(
+        "SELECT stem, word, n FROM word_counts ORDER BY stem, word"
+    )
+    assert [(row["stem"], row["word"], row["n"]) for row in rows] == [
+        ("код", "код", 4),
+        ("кот", "кот", 2),
+        ("кот", "кота", 1),
+    ]
+
+    collector.add_words(CHAT, 7, date(2026, 1, 5), {("кот", "кот"): 3})
+    await collector.flush(db)
+    assert (await db.fetchval("SELECT n FROM word_counts WHERE word = 'кот'")) == 5
+
+    class BoomPool:
+        def acquire(self):
+            raise RuntimeError("db down")
+
+    failing = Collector()
+    failing.add_words(CHAT, 7, date(2026, 1, 5), {("кот", "кот"): 3})
+    with contextlib.suppress(RuntimeError):
+        await failing.flush(type("DB", (), {"pool": BoomPool()})())
+    assert failing.pending_words == 1
+    assert failing.snapshot_words()[0][5] == 3
+
+
+async def test_word_stats_total_by_member_and_periods(db):
+    await seed_chat(db)
+    period = resolve("7d", "UTC", now=NOW)
+    assert wordstats.local_day_bounds(period, "UTC") == (date(2026, 1, 4), date(2026, 1, 11))
+
+    today = resolve("d", "Europe/Moscow", now=NOW)
+    assert wordstats.local_day_bounds(today, "Europe/Moscow") == (
+        date(2026, 1, 10),
+        date(2026, 1, 11),
+    )
+
+    await add_word(db, 1, date(2026, 1, 5), "кот", "кот", 3)
+    await add_word(db, 1, date(2026, 1, 5), "кот", "кота", 2)
+    await add_word(db, 1, date(2026, 1, 6), "код", "код", 1)
+    await add_word(db, 2, date(2026, 1, 5), "кот", "кот", 1)
+    await add_word(db, 2, date(2026, 1, 6), "код", "код", 4)
+    await add_word(db, 1, date(2026, 1, 1), "старое", "старое", 100)
+    await add_word(db, 1, date(2026, 1, 12), "новое", "новое", 100)
+
+    total = await wordstats.top_words(db, CHAT, period, "UTC", 0, 10)
+    assert [(e.word, e.uses, e.members) for e in total.entries] == [
+        ("кот", 6, 2),
+        ("код", 5, 2),
+    ]
+    assert (total.total_uses, total.unique_words, total.active_users) == (11, 2, 2)
+    assert total.pages == 1
+
+    paged = await wordstats.top_words(db, CHAT, period, "UTC", 0, 1)
+    assert paged.pages == 2 and paged.entries[0].word == "кот"
+    assert (await wordstats.top_words(db, CHAT, period, "UTC", 99, 1)).page == 1
+
+    by_member = await wordstats.words_by_member(
+        db, CHAT, period, "UTC", 0, 10, per_member=1
+    )
+    assert (by_member.total_members, by_member.total_uses) == (2, 11)
+    assert [member.user_id for member in by_member.members] == [1, 2]
+    first = by_member.members[0]
+    assert first.total_uses == 6 and first.unique_words == 2
+    assert [(word.word, word.uses) for word in first.words] == [("кот", 5)]
+
+    member_page = await wordstats.words_by_member(
+        db, CHAT, period, "UTC", 1, 1, per_member=1
+    )
+    assert member_page.page == 1 and member_page.pages == 2
+    assert [member.user_id for member in member_page.members] == [2]
+
+    all_time = resolve("all", "UTC", now=NOW)
+    everything = await wordstats.top_words(db, CHAT, all_time, "UTC", 0, 10)
+    assert everything.total_uses == 211
+    assert everything.unique_words == 4
 
 
 async def test_top_ordering_pagination_and_metrics(db):

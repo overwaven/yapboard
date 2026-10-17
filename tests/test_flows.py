@@ -115,6 +115,81 @@ async def test_callback_edits_the_same_message(db):
     assert "Last 30 days" in heading and "Characters" in heading
 
 
+async def test_words_command_and_callback_switch_modes(db):
+    session, bot, ctx, dp = setup(db)
+    await ctx.chats.ensure(CHAT_ID, "Testers")
+    await db.execute(
+        "INSERT INTO word_counts (chat_id, user_id, day, stem, word, n) "
+        "VALUES ($1, $2, $3, $4, $5, $6)",
+        CHAT_ID,
+        USER_ID,
+        datetime.now(UTC).date(),
+        "кот",
+        "кот",
+        3,
+    )
+
+    await dp.feed_update(bot, Update(update_id=1, message=make_message("/words")))
+    await dp.feed_update(bot, Update(update_id=2, message=make_message("/words 30d", message_id=2)))
+
+    sent = session.of(SendRichMessage)
+    headings = [m.rich_message.blocks[0].text for m in sent]
+    assert not session.of(SendMessage)
+    assert "Words" in headings[0] and "Everyone" in headings[0]
+    assert "Last 30 days" in headings[1] and "Everyone" in headings[1]
+    table = next(block for block in sent[0].rich_message.blocks if block.type.value == "table")
+    assert table.cells[1][1].text == "кот" and table.cells[1][2].text == "3"
+
+    callback = CallbackQuery(
+        id="3",
+        from_user=USER,
+        chat_instance="ci",
+        message=make_message("/words", message_id=55),
+        data=callbacks.encode_words(USER_ID, "7d", callbacks.WORDS_BY_MEMBER, 0),
+    )
+    await dp.feed_update(bot, Update(update_id=3, callback_query=callback))
+    edits = session.of(EditMessageText)
+    assert len(edits) == 1 and edits[0].message_id == 55
+    assert "Words" in edits[0].rich_message.blocks[0].text
+    assert "By member" in edits[0].rich_message.blocks[0].text
+
+
+async def test_tracker_collects_normalized_words(db):
+    _session, bot, ctx, dp = setup(db)
+    await ctx.chats.ensure(CHAT_ID, "Testers")
+
+    await dp.feed_update(
+        bot,
+        Update(
+            update_id=1,
+            message=make_message("Кот кота код, как дела? Проверка https://x.test @alex"),
+        ),
+    )
+    await ctx.collector.flush(db)
+
+    rows = await db.fetch("SELECT stem, SUM(n) AS n FROM word_counts GROUP BY stem")
+    totals = {row["stem"]: int(row["n"]) for row in rows}
+    assert totals["кот"] == 2
+    assert totals["код"] == 1
+    assert totals["дел"] == 1
+    assert totals["проверк"] == 1
+    assert "как" not in totals and "x" not in totals
+
+
+async def test_optout_stops_word_collection(db):
+    session, bot, ctx, dp = setup(db)
+    await ctx.chats.ensure(CHAT_ID, "Testers")
+    await ctx.optouts.set(CHAT_ID, USER_ID, True)
+
+    await dp.feed_update(
+        bot, Update(update_id=1, message=make_message("кот кот код ошибка"))
+    )
+    await ctx.collector.flush(db)
+
+    assert (await db.fetchval("SELECT count(*) FROM activity_hourly")) == 0
+    assert (await db.fetchval("SELECT count(*) FROM word_counts")) == 0
+
+
 async def test_hours_and_stats_commands(db):
     session, bot, _ctx, dp = setup(db)
 
@@ -131,6 +206,16 @@ async def test_privacy_optout_and_forgetme(db):
     await ctx.chats.ensure(CHAT_ID, "Testers")
     ctx.collector.add(CHAT_ID, USER_ID, NOW, msgs=3)
     await ctx.collector.flush(db)
+    await db.execute(
+        "INSERT INTO word_counts (chat_id, user_id, day, stem, word, n) "
+        "VALUES ($1, $2, $3, $4, $5, $6)",
+        CHAT_ID,
+        USER_ID,
+        datetime(2026, 1, 10, tzinfo=UTC).date(),
+        "кот",
+        "кот",
+        3,
+    )
 
     await dp.feed_update(bot, Update(update_id=1, message=make_message("/optout")))
     assert await ctx.optouts.is_opted_out(CHAT_ID, USER_ID) is True
@@ -147,4 +232,5 @@ async def test_privacy_optout_and_forgetme(db):
     )
     await dp.feed_update(bot, Update(update_id=3, callback_query=callback))
     assert (await db.fetchval("SELECT count(*) FROM activity_hourly")) == 0
+    assert (await db.fetchval("SELECT count(*) FROM word_counts")) == 0
     assert session.of(AnswerCallbackQuery)

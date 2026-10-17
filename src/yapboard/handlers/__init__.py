@@ -8,7 +8,7 @@ from ..context import AppContext
 
 
 def build_router(ctx: AppContext) -> Router:
-    from . import common, hours, leaderboard, me, privacy, settings, stats, tracker
+    from . import common, hours, leaderboard, me, privacy, settings, stats, tracker, words
 
     router = Router(name="yapboard")
     # The tracker installs an outer middleware, so registration order does not
@@ -16,6 +16,7 @@ def build_router(ctx: AppContext) -> Router:
     tracker.setup(router, ctx)
     common.setup(router, ctx)
     leaderboard.setup(router, ctx)
+    words.setup(router, ctx)
     me.setup(router, ctx)
     hours.setup(router, ctx)
     stats.setup(router, ctx)

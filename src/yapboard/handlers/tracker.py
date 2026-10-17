@@ -3,7 +3,9 @@
 Implemented as an *outer middleware* so it observes every group message
 (including commands) without ever replying or consuming updates.
 
-Nothing about the message content is stored — only counters, never text.
+Activity counters are always stored. When word stats are enabled, normalized
+word frequencies are stored too — never message text, word order or a link to
+the original message.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from aiogram.enums import ContentType
 from aiogram.types import Message
 
 from ..context import AppContext
+from ..words import WordNormalizer
 from .util import GROUP_TYPES
 
 log = logging.getLogger(__name__)
@@ -38,6 +41,7 @@ MEDIA_TYPES = frozenset(
 class ActivityMiddleware(BaseMiddleware):
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
+        self.words = WordNormalizer()
 
     async def __call__(  # type: ignore[override]
         self,
@@ -64,9 +68,10 @@ class ActivityMiddleware(BaseMiddleware):
             return
 
         ctx = self.ctx
-        if await ctx.chats.get(chat.id) is None:
-            await ctx.chats.ensure(chat.id, chat.title)
-        if not await ctx.chats.is_collecting(chat.id):
+        chat_settings = await ctx.chats.get(chat.id)
+        if chat_settings is None:
+            chat_settings = await ctx.chats.ensure(chat.id, chat.title)
+        if not chat_settings.collecting:
             return
         if await ctx.optouts.is_opted_out(chat.id, user.id):
             return
@@ -87,6 +92,12 @@ class ActivityMiddleware(BaseMiddleware):
             media=media,
             replies=replies,
         )
+
+        if ctx.settings.word_stats_enabled and text and not text.lstrip().startswith("/"):
+            words = self.words.extract(text)
+            if words:
+                day = message.date.astimezone(chat_settings.zone).date()
+                ctx.collector.add_words(chat.id, user.id, day, words)
 
 
 def setup(router: Router, ctx: AppContext) -> None:
